@@ -1,0 +1,129 @@
+#!/bin/sh /etc/rc.common
+# Copyright (C) 2020 Zxilly <zhouxinyu1001@gmail.com>
+# Copyright (C) 2021 Tianling Shen <cnsztl@immortalwrt.org>
+
+USE_PROCD=1
+
+START=99
+
+NAME="ua2fcpp"
+PROG="/usr/bin/$NAME"
+IPT_M="iptables -t mangle"
+IP6T_M="ip6tables -t mangle"
+
+
+FW_DIR="/var/etc"
+FW_CONF="$FW_DIR/ua2fcpp.include"
+
+if type extra_command >"/dev/null" 2>&1; then
+	extra_command "setup_firewall setup_firewall6"
+else
+	EXTRA_COMMANDS="setup_firewall setup_firewall6"
+fi
+
+setup_firewall() {
+	config_load "$NAME"
+
+	local handle_fw
+	config_get_bool handle_fw "firewall" "handle_fw" "0"
+	[ "$handle_fw" -eq "1" ] || return 1
+
+	$IPT_M -N ua2f
+	$IPT_M -A ua2f -m connmark --mark 43 -j RETURN # 不处理标记为非 http 的流 (实验性)
+	$IPT_M -A ua2f -p tcp --dport 22 -j RETURN # 不处理 SSH
+	$IPT_M -A ua2f -j NFQUEUE --queue-balance 10010:10013
+	$IPT_M -A FORWARD -p tcp -m conntrack --ctdir ORIGINAL -j ua2f
+}
+
+setup_firewall6() {
+	config_load "$NAME"
+
+	local handle_fw6
+	config_get_bool handle_fw6 "firewall" "handle_fw6" "0"
+	[ "$handle_fw6" -eq "1" ] || return 1
+
+	$IP6T_M -N ua2f
+	$IP6T_M -A ua2f -m connmark --mark 43 -j RETURN # 不处理标记为非 http 的流 (实验性)
+	$IP6T_M -A ua2f -p tcp --dport 22 -j RETURN # 不处理 SSH
+	$IP6T_M -A ua2f -j NFQUEUE --queue-balance 10010:10013
+	$IP6T_M -A FORWARD -p tcp -m conntrack --ctdir ORIGINAL -j ua2f
+}
+
+start_service() {
+	config_load "$NAME"
+
+	local enabled
+	config_get_bool enabled "enabled" "enabled" "0"
+	[ "$enabled" -eq "1" ] || return 1
+
+	local ua_enabled
+	config_get_bool ua_enabled "options" "ua" "0"
+
+	local ua_bypass_enabled
+	config_get_bool ua_bypass_enabled "options" "ua_bypass" "0"
+
+	local tcp_timestamps_enabled
+	config_get_bool tcp_timestamps_enabled "options" "tcp_timestamps" "0"
+
+	local ipid_enabled
+	config_get_bool ipid_enabled "options" "ipid" "0"
+
+	local disable_ct_mark_enabled
+	config_get_bool disable_ct_mark_enabled "options" "disable_ct_mark" "0"
+
+	local cmd_args=""
+	[ "$ua_enabled" -eq "1" ] && cmd_args="$cmd_args --ua"
+	[ "$ua_bypass_enabled" -eq "1" ] && cmd_args="$cmd_args --ua-bypass"
+	[ "$tcp_timestamps_enabled" -eq "1" ] && cmd_args="$cmd_args --tcp-timestamps"
+	[ "$ipid_enabled" -eq "1" ] && cmd_args="$cmd_args --ipid"
+	[ "$disable_ct_mark_enabled" -eq "1" ] && cmd_args="$cmd_args --disable-ct-mark"
+
+	procd_open_instance "$NAME"
+	procd_set_param command "$PROG" 10010 4 "$cmd_args"
+
+	local handle_fw
+	config_get_bool handle_fw "firewall" "handle_fw" "0"
+	[ "$handle_fw" -eq "1" ] && {
+		setup_firewall
+		mkdir -p "$FW_DIR"
+		echo -e "/etc/init.d/$NAME setup_firewall" > "$FW_CONF"
+	}
+
+	local handle_fw6
+	config_get_bool handle_fw6 "firewall" "handle_fw6" "0"
+	[ "$handle_fw6" -eq "1" ] && {
+		setup_firewall6
+		echo -e "/etc/init.d/$NAME setup_firewall6" > "$FW_CONF"
+	}
+
+	procd_set_param stdout 1
+	procd_set_param stderr 1
+	procd_set_param respawn
+
+	procd_close_instance
+}
+
+stop_service() {
+	(
+		$IPT_M -D FORWARD -p tcp -m conntrack --ctdir ORIGINAL -j ua2f
+		$IPT_M -D FORWARD -p tcp -m conntrack --ctdir REPLY
+		$IPT_M -F ua2f
+		$IPT_M -X ua2f
+		$IP6T_M -D FORWARD -p tcp -m conntrack --ctdir ORIGINAL -j ua2f
+		$IP6T_M -D FORWARD -p tcp -m conntrack --ctdir REPLY
+		$IP6T_M -F ua2f
+		$IP6T_M -X ua2f
+		echo > "$FW_CONF"
+	) 2>"/dev/null"
+	killall -q "$NAME"
+}
+
+reload_service() {
+	stop
+	start
+}
+
+service_triggers() {
+	procd_add_reload_trigger "$NAME"
+}
+

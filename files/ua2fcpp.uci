@@ -1,0 +1,10 @@
+#!/bin/sh
+
+uci -q batch <<-EOF >/dev/null
+	delete firewall.ua2fcpp
+	set firewall.ua2fcpp=include
+	set firewall.ua2fcpp.type=script
+	set firewall.ua2fcpp.path=/var/etc/ua2fcpp.include
+	set firewall.ua2fcpp.reload=1
+	commit firewall
+EOF
